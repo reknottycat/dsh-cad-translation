@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "CAD drawing translation",
+    "description": "Translate the text inside DXF/DWG drawings, follow the backend task, and download the translated drawing from a session."
+  }
+}
