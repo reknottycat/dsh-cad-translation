@@ -160,7 +160,9 @@ in an isolated checkout and rerun the tests:
 ```bash
 npm install --no-save --no-package-lock --ignore-scripts @deepseek-ai/dsh-tools@0.2.2-alpha.3
 node --test tests/*.test.mjs
-``` The optional backend end-to-end
+```
+
+The optional backend end-to-end
 suite needs a separately running backend, a configured provider and `ezdxf`:
 
 ```bash
