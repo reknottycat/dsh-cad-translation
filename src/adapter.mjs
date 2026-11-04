@@ -8,6 +8,17 @@
  */
 
 import { apply as applyTools, inject, namespacedName } from './cad-translator.mjs'
+import Schema from '@deepseek-ai/schemastery'
+
+// Leave defaults unset so environment variables remain effective.
+export const Config = Schema.object({
+  id: Schema.string(),
+  backend: Schema.object({
+    baseUrl: Schema.string(),
+    requestTimeoutMs: Schema.number().min(1),
+    outputDir: Schema.string(),
+  }),
+})
 
 /**
  * Row configuration: the Cordis row id plus the backend settings.
@@ -33,10 +44,10 @@ export function apply(ctx, config = {}) {
  * @param {AdapterConfig} config
  */
 export function createPlugin(config = {}) {
-  return { name: namespacedName(config.id), inject, apply }
+  return { name: namespacedName(config.id), inject, Config, apply }
 }
 
 /** Row-agnostic default plugin; the bundle patch mounts `createPlugin` instead. */
-const plugin = { name: 'cad-translation', inject, apply }
+const plugin = { name: 'cad-translation', inject, Config, apply }
 
 export default plugin

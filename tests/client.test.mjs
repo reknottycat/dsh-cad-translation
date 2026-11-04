@@ -1,6 +1,7 @@
 /** Transport-level tests for the backend client, against the mock backend. */
 
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,6 +29,7 @@ describe('client helpers', () => {
     assert.throws(() => normalizeBaseUrl(''), /baseUrl is required/)
     assert.throws(() => normalizeBaseUrl('ftp://x'), /must use http or https/)
     assert.throws(() => normalizeBaseUrl('not a url'), /not a valid URL/)
+    assert.throws(() => normalizeBaseUrl('https://user:password@example.com'), /must not contain username or password/)
   })
 
   it('reads both content-disposition filename forms', () => {
@@ -130,6 +132,88 @@ describe('CadTranslationClient against the mock backend', () => {
       client().downloadArtifact({ taskId: 'bbbb0002', artifact: 'translated_cad', outputDir: workDir }),
       (error) => error instanceof CadHttpError && error.status === 404,
     )
+  })
+
+  it('refuses path components from both callers and server headers', async () => {
+    for (const fileName of ['../escape.dxf', '..\\escape.dxf', '/tmp/escape.dxf', 'C:escape.dxf', '..']) {
+      await assert.rejects(client().downloadArtifact({ taskId: 'aaaa0001', artifact: 'excel', outputDir: workDir, fileName }), /plain file name/)
+    }
+    const malicious = new CadTranslationClient({
+      baseUrl: 'http://backend.invalid',
+      fetch: async () => new Response('data', { headers: { 'Content-Disposition': "attachment; filename*=UTF-8''..%2Fescaped.dxf" } }),
+    })
+    await assert.rejects(malicious.downloadArtifact({ taskId: 'aaaa0001', artifact: 'excel', outputDir: workDir }), /plain file name/)
+  })
+
+  it('does not overwrite an existing artifact', async () => {
+    const fileName = 'keep-existing.xlsx'
+    const target = join(workDir, fileName)
+    await writeFile(target, 'original')
+    await assert.rejects(client().downloadArtifact({ taskId: 'aaaa0001', artifact: 'excel', outputDir: workDir, fileName }), error => error.code === 'EEXIST')
+    assert.equal(await readFile(target, 'utf8'), 'original')
+  })
+
+  it('redacts echoed tokens in JSON and download errors', async () => {
+    const secret = 'secret-token'
+    for (const kind of ['json', 'non-json', 'download']) {
+      const subject = new CadTranslationClient({ baseUrl: 'http://backend.invalid', adminToken: secret,
+        fetch: async () => kind === 'json'
+          ? Response.json({ detail: `invalid ${secret}` }, { status: 403 })
+          : new Response(`invalid ${secret}`, { status: 403 }),
+      })
+      const action = kind === 'download' ? subject.downloadArtifact({ taskId: 'aaaa0001', artifact: 'excel', outputDir: workDir }) : subject.getTask('aaaa0001')
+      await assert.rejects(action, error => {
+        assert.equal(error.message.includes(secret), false)
+        assert.equal(error.detail.includes(secret), false)
+        assert.match(error.detail, /\[REDACTED\]/)
+        return true
+      })
+    }
+  })
+
+  it('redacts JSON-escaped tokens in nested error details', async () => {
+    const secret = 'a"b\\c'
+    const subject = new CadTranslationClient({ baseUrl: 'http://backend.invalid', adminToken: secret,
+      fetch: async () => Response.json({ detail: { echoedToken: secret } }, { status: 403 }),
+    })
+    await assert.rejects(subject.getTask('aaaa0001'), error => {
+      assert.equal(error.message.includes(secret), false)
+      assert.equal(error.message.includes(JSON.stringify(secret).slice(1, -1)), false)
+      assert.match(error.message, /\[REDACTED\]/)
+      return true
+    })
+  })
+
+  it('never exposes tokens that coincide with or occur inside the redaction marker', async () => {
+    for (const secret of ['REDACTED', '[REDACTED]', '█']) {
+      const subject = new CadTranslationClient({ baseUrl: 'http://backend.invalid', adminToken: secret,
+        fetch: async () => Response.json({ detail: `exposed ${secret}` }, { status: 403 }),
+      })
+      await assert.rejects(subject.getTask('aaaa0001'), error => {
+        assert.equal(error.message.includes(secret), false)
+        assert.equal(error.detail.includes(secret), false)
+        return true
+      })
+    }
+  })
+
+  it('does not forward the admin token through redirects', async () => {
+    let received = false
+    const destination = createServer((req, res) => { received = true; res.end('{}') })
+    await new Promise(done => destination.listen(0, '127.0.0.1', done))
+    const redirect = createServer((req, res) => {
+      res.writeHead(302, { Location: `http://127.0.0.1:${destination.address().port}/stolen` })
+      res.end()
+    })
+    await new Promise(done => redirect.listen(0, '127.0.0.1', done))
+    try {
+      const subject = new CadTranslationClient({ baseUrl: `http://127.0.0.1:${redirect.address().port}`, adminToken: 'secret-token' })
+      await assert.rejects(subject.getTask('aaaa0001'))
+      await assert.rejects(subject.downloadArtifact({ taskId: 'aaaa0001', artifact: 'excel', outputDir: workDir }))
+      assert.equal(received, false)
+    } finally {
+      await Promise.all([new Promise(done => destination.close(done)), new Promise(done => redirect.close(done))])
+    }
   })
 
   it('lists tasks and clamps the page size', async () => {

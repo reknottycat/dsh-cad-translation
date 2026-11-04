@@ -1,2 +1,4 @@
-# Presets are mounted using a generated profile patch; see the plugin README.
-[]
+# Register once in the Host tools registry; agent scopes inherit these tools.
+- insert:
+    - id: tool-cad-translation
+      name: dsh-cad-translation/translator

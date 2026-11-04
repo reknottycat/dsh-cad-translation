@@ -9,7 +9,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, describe, it } from 'node:test'
@@ -25,6 +26,7 @@ async function harnessOrSkip() {
   try {
     return { module: await importHarnessModule('@deepseek-ai/dsh-tools') }
   } catch (error) {
+    if (process.env.DSH_REQUIRE_HARNESS === '1') throw error
     return {
       skip: `@deepseek-ai/dsh-tools is not installed here: ${error.message.split('\n')[0]}. `
         + 'Run from a Harness profile or export DSH_HOME.',
@@ -262,5 +264,91 @@ describe('CAD tools end to end against the mock backend', harnessOptions, () => 
       runTool(registrations.cad_download_drawing, { task_id: '../escape', artifact: 'excel' }),
       /taskId must be the 8-character hex id/,
     )
+  })
+})
+
+describe('tool output token redaction', harnessOptions, () => {
+  it('redacts both rotated tokens when a token matches the usual marker', async () => {
+    const original = process.env.CAD_TRANSLATION_ADMIN_TOKEN
+    const first = 'REDACTED'
+    const next = '[REDACTED]'
+    process.env.CAD_TRANSLATION_ADMIN_TOKEN = first
+    const server = createServer((req, res) => {
+      process.env.CAD_TRANSLATION_ADMIN_TOKEN = next
+      res.end(JSON.stringify({ data: [makeTask({ original_filename: `${first} ${next}.dxf` })], total: 1 }))
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    try {
+      const collected = []
+      await apply({ tools: { register: item => collected.push(item) } }, {
+        backend: { baseUrl: `http://127.0.0.1:${server.address().port}` },
+      })
+      const status = collected.find(item => item.name === 'cad_translation_status')
+      const result = await runTool(status, {})
+      const rendered = JSON.stringify(result)
+      assert.equal(rendered.includes(first), false)
+      assert.equal(rendered.includes(next), false)
+    } finally {
+      if (original === undefined) delete process.env.CAD_TRANSLATION_ADMIN_TOKEN
+      else process.env.CAD_TRANSLATION_ADMIN_TOKEN = original
+      await new Promise(done => server.close(done))
+    }
+  })
+
+  it('redacts nested status, logs, saved names and errors without changing the real paths', async () => {
+    const token = 'test-secret-token'
+    const task = makeTask({ task_id: 'aaaa0001', original_filename: `${token}.dxf`, last_error: `log ${token}`,
+      files: { excel_file: `/data/${token}.xlsx` } })
+    const server = createServer((req, res) => {
+      const path = new URL(req.url, 'http://localhost').pathname
+      if (path.endsWith('/logs')) return res.end(JSON.stringify({ data: { logs: `start ${token} end` } }))
+      if (path.endsWith('/download/aaaa0001/excel')) {
+        res.setHeader('content-disposition', `attachment; filename="${token}.xlsx"`)
+        return res.end('artifact')
+      }
+      const data = path === '/api/cad/tasks' ? [task] : task
+      res.end(JSON.stringify({ data, total: 1 }))
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const workDir = await mkdtemp(join(tmpdir(), 'dsh-cad-redaction-'))
+    try {
+      const collected = []
+      await apply({ tools: { register: item => collected.push(item) } }, {
+        backend: { baseUrl: `http://127.0.0.1:${server.address().port}`, outputDir: workDir, adminToken: token },
+      })
+      const tools = Object.fromEntries(collected.map(item => [item.name, item]))
+      for (const args of [{}, { task_id: 'aaaa0001', include_log: true }]) {
+        const result = await runTool(tools.cad_translation_status, args)
+        assert.equal(JSON.stringify(result).includes(token), false)
+        assert.match(JSON.stringify(result), /\[REDACTED\]/)
+      }
+      const result = await runTool(tools.cad_download_drawing, { task_id: 'aaaa0001', artifact: 'excel' })
+      assert.equal(JSON.stringify(result).includes(token), false)
+      assert.match(result.value.fileName, /\[REDACTED\]/)
+      // Redaction must not change the actual file written to disk.
+      assert.equal(await readFile(join(workDir, `${token}.xlsx`), 'utf8'), 'artifact')
+      const coincident = []
+      await apply({ tools: { register: item => coincident.push(item) } }, {
+        backend: { baseUrl: `http://127.0.0.1:${server.address().port}`, adminToken: 'aaaa0001' },
+      })
+      const statusTool = coincident.find(item => item.name === 'cad_translation_status')
+      const status = await runTool(statusTool, { task_id: 'aaaa0001', include_log: true })
+      assert.equal(status.value.tasks[0].taskId, '[REDACTED]')
+      assert.match(status.value.log, /start/)
+      task.status = 'error'
+      await assert.rejects(runTool(tools.cad_download_drawing, { task_id: 'aaaa0001', artifact: 'excel' }), error => {
+        assert.equal(error.message.includes(token), false)
+        assert.match(error.message, /\[REDACTED\]/)
+        return true
+      })
+      await assert.rejects(runTool(tools.cad_translate, { file_path: join(workDir, `${token}-missing.dxf`), target_language: 'en' }), error => {
+        assert.equal(error.message.includes(token), false)
+        assert.match(error.message, /\[REDACTED\]/)
+        return true
+      })
+    } finally {
+      await new Promise(done => server.close(done))
+      await rm(workDir, { recursive: true, force: true })
+    }
   })
 })

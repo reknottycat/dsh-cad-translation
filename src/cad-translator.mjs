@@ -8,7 +8,7 @@
 
 import { stat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
-import { CadTranslationClient } from '../client.mjs'
+import { CadTranslationClient, redactText } from '../client.mjs'
 import { importHarnessModule } from './dsh-tools.mjs'
 
 /** Stable Cordis plugin identity. */
@@ -140,6 +140,19 @@ function rethrow(error) {
   throw error
 }
 
+// Redact at the tool boundary only; backend IDs and paths stay intact while
+// the operation runs. Both canonical values and rendered messages are covered.
+function redactValue(value, tokens) {
+  if (typeof value === 'string') {
+    return redactText(value, tokens)
+  }
+  if (Array.isArray(value)) return value.map(item => redactValue(item, tokens))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, tokens)]))
+  }
+  return value
+}
+
 /**
  * Register the three CAD tools.
  * @param {import('@deepseek-ai/cordis').Context} ctx
@@ -162,8 +175,31 @@ export async function apply(ctx, rawConfig = {}) {
     request: (path, init) => new CadTranslationClient(backend()).request(path, init),
   }
   const { defineTool } = await importHarnessModule('@deepseek-ai/dsh-tools')
+  const registerTool = definition => {
+    const execute = definition.execute
+    ctx.tools.register(defineTool({
+      ...definition,
+      async execute(args, exec) {
+        const initialToken = String(backend().adminToken ?? '').trim()
+        try {
+          const value = await execute(args, exec)
+          const safe = redactValue(value, [...new Set([initialToken, String(backend().adminToken ?? '').trim()])])
+          // Truncate only after redaction to avoid exposing part of a token.
+          if (typeof safe?.log === 'string') safe.log = tail(safe.log, 4000)
+          return safe
+        } catch (error) {
+          const tokens = [...new Set([initialToken, String(backend().adminToken ?? '').trim()])]
+          const message = redactValue(String(error?.message ?? error), tokens)
+          const safe = new Error(message)
+          safe.name = redactValue(String(error?.name || 'Error'), tokens)
+          if (typeof error?.code === 'string') safe.code = redactValue(error.code, tokens)
+          throw safe
+        }
+      },
+    }))
+  }
 
-  ctx.tools.register(defineTool({
+  registerTool({
     name: 'cad_translate',
     description: 'Translate the text of a DXF/DWG drawing into another language and return a task id. '
       + 'The backend converts, extracts, translates and writes the text back asynchronously; '
@@ -241,9 +277,9 @@ export async function apply(ctx, rawConfig = {}) {
         throw rethrow(error)
       }
     },
-  }))
+  })
 
-  ctx.tools.register(defineTool({
+  registerTool({
     name: 'cad_translation_status',
     description: 'Read the progress of one CAD translation task, or list the recent tasks when task_id is omitted. '
       + 'A task is settled when status is done, partial, error or cancelled.',
@@ -309,14 +345,14 @@ export async function apply(ctx, rawConfig = {}) {
         const task = toTaskView(summary)
         if (args.include_log !== true) return { tasks: [task], message: describeTask(summary) }
         const logs = await client.request(`/api/cad/tasks/${task.taskId}/logs`, { signal: exec.signal })
-        return { tasks: [task], log: tail(String(logs?.data?.logs ?? ''), 4000), message: describeTask(summary) }
+        return { tasks: [task], log: String(logs?.data?.logs ?? ''), message: describeTask(summary) }
       } catch (error) {
         throw rethrow(error)
       }
     },
-  }))
+  })
 
-  ctx.tools.register(defineTool({
+  registerTool({
     name: 'cad_download_drawing',
     description: 'Download a finished artifact of one CAD translation task to a local directory: '
       + 'the back-filled drawing (translated_cad) or the extracted/translated text workbook (excel).',
@@ -391,7 +427,7 @@ export async function apply(ctx, rawConfig = {}) {
         throw rethrow(error)
       }
     },
-  }))
+  })
 }
 
 /**

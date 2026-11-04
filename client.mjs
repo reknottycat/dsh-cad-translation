@@ -63,12 +63,47 @@ export function normalizeBaseUrl(value) {
   try {
     url = new URL(raw)
   } catch {
-    throw new Error(`baseUrl is not a valid URL: ${JSON.stringify(value)}`)
+    throw new Error('baseUrl is not a valid URL')
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`baseUrl must use http or https (got ${JSON.stringify(url.protocol)})`)
   }
+  if (url.username || url.password) throw new Error('baseUrl must not contain username or password')
   return url.toString().replace(/\/+$/, '')
+}
+
+/** Redact original and JSON-escaped secrets without exposing the marker itself. */
+export function redactText(value, tokens) {
+  const text = String(value ?? '')
+  const secrets = [...new Set(tokens.map(token => String(token ?? '').trim()).filter(Boolean))]
+  if (!secrets.length) return text
+  const patterns = [...new Set(secrets.flatMap(secret => [secret, JSON.stringify(secret).slice(1, -1)]))]
+    .sort((a, b) => b.length - a.length)
+  let marker = '[REDACTED]'
+  // A token contained in the marker or crossing its edge must not reappear.
+  if (patterns.some(secret => marker.includes(secret) || /[\[\]]/.test(secret))) {
+    let point = 0x2588
+    let found = false
+    while (point <= 0x10ffff) {
+      if (point >= 0xd800 && point <= 0xdfff) { point = 0xe000; continue }
+      const character = String.fromCodePoint(point++)
+      if (patterns.every(secret => !secret.includes(character))) { marker = character.repeat(8); found = true; break }
+    }
+    if (!found) return ''
+  }
+  const alternatives = patterns.map(secret => secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  return text.replace(new RegExp(alternatives, 'g'), () => marker)
+}
+
+function redact(value, token) { return redactText(value, [token]) }
+
+/** Accept a file name, not a path, on both POSIX and Windows. */
+function safeFileName(value) {
+  const name = String(value ?? '')
+  if (!name || name === '.' || name === '..' || /[\\/:\x00-\x1f\x7f]/.test(name)) {
+    throw new Error('artifact filename must be a plain file name without path separators')
+  }
+  return name
 }
 
 /** @param {string} value */
@@ -154,6 +189,7 @@ export class CadTranslationClient {
     try {
       response = await this.fetch(url, {
         ...rest,
+        redirect: 'manual',
         signal: combined,
         headers: { ...adminHeaders(this.adminToken), ...headers },
       })
@@ -162,7 +198,10 @@ export class CadTranslationClient {
       if (timeout.aborted) {
         throw new CadConnectionError(`backend did not answer ${path} within ${timeoutMs ?? this.requestTimeoutMs} ms`)
       }
-      throw new CadConnectionError(`cannot reach the CAD translation backend at ${this.baseUrl}`, { cause: error })
+      throw new CadConnectionError(redact(`cannot reach the CAD translation backend at ${this.baseUrl}`, this.adminToken))
+    }
+    if (response.status >= 300 && response.status < 400) {
+      throw new CadConnectionError('backend redirected the request; configure the final backend URL directly')
     }
     const text = await response.text()
     let payload
@@ -170,11 +209,11 @@ export class CadTranslationClient {
       payload = text ? JSON.parse(text) : {}
     } catch {
       throw new CadHttpError(`backend returned non-JSON output for ${path}`, {
-        status: response.status, detail: text.slice(0, 500), path,
+        status: response.status, detail: redact(text, this.adminToken).slice(0, 500), path,
       })
     }
     if (!response.ok) {
-      const detail = typeof payload?.detail === 'string' ? payload.detail : JSON.stringify(payload)
+      const detail = redact(typeof payload?.detail === 'string' ? payload.detail : JSON.stringify(payload), this.adminToken)
       throw new CadHttpError(`backend rejected ${path} (HTTP ${response.status}): ${detail}`, {
         status: response.status, detail, path,
       })
@@ -257,14 +296,18 @@ export class CadTranslationClient {
     try {
       response = await this.fetch(`${this.baseUrl}${path}`, {
         signal,
+        redirect: 'manual',
         headers: adminHeaders(this.adminToken),
       })
     } catch (error) {
       if (input.signal?.aborted) throw error
-      throw new CadConnectionError(`cannot reach the CAD translation backend at ${this.baseUrl}`, { cause: error })
+      throw new CadConnectionError(redact(`cannot reach the CAD translation backend at ${this.baseUrl}`, this.adminToken))
+    }
+    if (response.status >= 300 && response.status < 400) {
+      throw new CadConnectionError('backend redirected the request; configure the final backend URL directly')
     }
     if (!response.ok) {
-      const detail = await response.text().catch(() => '')
+      const detail = redact(await response.text().catch(() => ''), this.adminToken)
       throw new CadHttpError(`backend rejected ${path} (HTTP ${response.status}): ${detail.slice(0, 500)}`, {
         status: response.status, detail, path,
       })
@@ -272,10 +315,10 @@ export class CadTranslationClient {
     const { writeFile, mkdir } = await import('node:fs/promises')
     const { join } = await import('node:path')
     await mkdir(input.outputDir, { recursive: true })
-    const name = input.fileName || fileNameFromDisposition(response.headers.get('content-disposition'))
-      || `${taskId}-${input.artifact === 'excel' ? 'text.xlsx' : 'translated.dxf'}`
+    const name = safeFileName(input.fileName || fileNameFromDisposition(response.headers.get('content-disposition'))
+      || `${taskId}-${input.artifact === 'excel' ? 'text.xlsx' : 'translated.dxf'}`)
     const target = join(input.outputDir, name)
-    await writeFile(target, Buffer.from(await response.arrayBuffer()))
+    await writeFile(target, Buffer.from(await response.arrayBuffer()), { flag: 'wx' })
     return { path: target, fileName: name }
   }
 

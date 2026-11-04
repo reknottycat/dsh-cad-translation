@@ -1,6 +1,6 @@
 {
   "name": "dsh-cad-translation",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Translate DXF/DWG drawing text from a DeepSeek Harness session through the CAD translation backend.",
   "type": "module",
   "license": "MIT",
@@ -20,7 +20,6 @@
     "locale/*.json",
     "docs/*.md",
     "patches/*.yml",
-    "scripts/*.cjs",
     "README.md"
   ],
   "dsh": {
@@ -31,13 +30,16 @@
     }
   },
   "engines": {
-    "dsh": ">=0.2.1-rc.1 <0.3.0"
+    "dsh": "0.2.1-rc.5"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.5"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": "^0.2.1-rc.1"
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5"
   },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-tools": { "optional": true }
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"

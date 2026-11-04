@@ -3,8 +3,8 @@
 Translate the text inside DXF/DWG drawings from a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 session, then download the translated drawing or the extracted text workbook.
 
-The plugin is a thin consumer of the separately installed [CAD translation
-backend](https://cnb.cool/star_fu/cad-translation-web). Conversion, text extraction, LLM translation and back-fill all stay in
+The plugin is a thin consumer of the separately installed [CAD Translation System](https://cnb.cool/star_fu/cad-translation-web)
+backend. Conversion, text extraction, LLM translation and back-fill all stay in
 the backend's own async task pipeline; the plugin only uploads a drawing,
 follows the task, and fetches the finished artifacts.
 
@@ -20,22 +20,21 @@ follows the task, and fetches the finished artifacts.
 
 | Item | Version / note |
 |------|----------------|
-| DeepSeek Harness (`dsh`) | `>=0.2.1-rc.1 <0.3.0`. Verified against `@deepseek-ai/dsh-tools@0.2.2-alpha.3`. |
+| DeepSeek Harness (`dsh`) | `0.2.1-rc.5` (the supported and tested version). |
 | Node.js | Node 24 verified for Harness 0.2.1-rc.5. The standalone plugin tests also run on Node 22; Node 22.14 did not start the Harness CLI. |
-| CAD translation backend | [CAD Translation System](https://cnb.cool/star_fu/cad-translation-web) FastAPI backend, reachable over HTTP and separately installed. |
+| CAD translation backend | The separately installed [CAD Translation System](https://cnb.cool/star_fu/cad-translation-web) FastAPI backend. |
 
-Harness is in developer preview and breaks compatibility between releases; the
-`engines.dsh` range is deliberately narrow. Re-run the tool contract tests
-after upgrading Harness.
+Harness is in developer preview and can break compatibility between releases.
+The package is restricted to the verified version. The `--network` test uses
+the pinned rc.5 tools and does not verify a newer Harness; upgrading requires
+testing installation and a real session against the target version.
 
 ## Install
 
-### 1. Install and start the backend
+### 1. Start the backend
 
-The backend is a separate project. Follow the setup and provider configuration
-in the [CAD Translation System repository](https://cnb.cool/star_fu/cad-translation-web).
-Start its backend on `http://127.0.0.1:8000`, or set the base URL below to
-its actual address. A configured model provider is required for real translation.
+Install and start the [CAD Translation System backend](https://cnb.cool/star_fu/cad-translation-web).
+Configure a model provider for full translation; the backend runs separately.
 
 ### 2. Provide the connection settings
 
@@ -51,37 +50,23 @@ export CAD_TRANSLATION_OUTPUT_DIR=.cad-translation          # optional, default 
 
 ### 3. Install and load in Harness
 
-The following commands are for macOS/Linux. Use Node 24 and a working `dsh`
-installation, verified with Harness 0.2.1-rc.5. Clone this plugin repository and run from its root:
+The following commands are for macOS/Linux. Use Node 24, Harness 0.2.1-rc.5,
+and pnpm on PATH. Run from the repository root:
 
 ```bash
 git clone https://github.com/reknottycat/dsh-cad-translation.git
 cd dsh-cad-translation
-
-# Select the same dsh installation for all commands.
-DSH_BIN="$(command -v dsh)"
-test -n "$DSH_BIN" || { echo "Install DeepSeek Harness first"; exit 1; }
-"$DSH_BIN" plugin --profile web add ./
-mkdir -p "$HOME/.config/dsh-cad-private"
-chmod 700 "$HOME/.config/dsh-cad-private"
-node scripts/build-profile-patch.cjs \
-  "$DSH_BIN" web "$HOME/.config/dsh-cad-private/cad.patch.yml"
-"$DSH_BIN" --profile web --patch "$HOME/.config/dsh-cad-private/cad.patch.yml" --no-open
+npm install --omit=dev --ignore-scripts --no-package-lock
+dsh plugin --profile web add ./
+dsh --profile web --no-open
 ```
 
-Open the address printed by Harness, create a **standard** session, and ask it
-to translate a DXF. The generated patch adds the tools to existing `standard`
-and `cordis` presets without modifying the profile. It contains the complete
-current preset configuration, potentially including private settings: keep it in
-a private directory and do not commit it. It is created with mode 0600 and the
-script refuses to overwrite an existing file. If the profile changes, generate
-a new patch at a new path and launch with that path. Other presets are not
-modified. This method is verified on Harness 0.2.1-rc.5; verify again after
-upgrading Harness. The backend must be running and configured as described above.
-
-Windows users can run the same steps in a shell with Node 24; pass the absolute
-path to the real dsh JavaScript entry point to the generator. Windows-specific
-installation and DWG conversion have not yet been verified.
+Open the address printed by Harness and start a session. The bundle registers
+its tools once in the Host registry: agent presets inherit them unless they
+restrict or shadow those tools. Restart Harness after installing or removing the
+bundle. Users of the previous generated profile patch should stop passing that
+patch when upgrading to this version to avoid duplicate registration.
+Windows installation and DWG conversion have not yet been verified.
 
 ## Use
 
@@ -120,9 +105,9 @@ translate, and `failed_count` says how many.
 * `CAD_TRANSLATION_ADMIN_TOKEN` is the backend's `ADMIN_API_TOKEN`, not an LLM
   key. LLM credentials stay in `backend/.env` or the backend's runtime config
   and never reach the plugin.
-* The token travels as the `X-Admin-Token` header on every request. It is not
-  logged, not stored in the session, and not included in tool output or error
-  messages.
+* The token travels as the `X-Admin-Token` header. Exact token values in returned strings and error messages are
+  redacted; schema field names are unchanged, and transformed or partial values
+  echoed by a server cannot be reliably recognized.
 * With `ENABLE_ADMIN_GUARD=true` and no `ADMIN_API_TOKEN`, the backend rejects
   every protected route with `503`; the plugin reports that as an actionable
   error instead of retrying.
@@ -140,6 +125,7 @@ translate, and `failed_count` says how many.
   tests use.
 * **Translation needs a configured provider.** Without an LLM provider the task
   ends in `error`; `extract_only: true` still produces the workbook.
+* **Downloads do not overwrite existing files.** Choose a different file name or output directory when the target exists. Backend URLs must point directly to the service: redirects are rejected.
 * **Files are uploaded, not linked.** The plugin reads the file from disk and
   sends it to the backend, so very large drawings cost one upload per task.
 * **No cancel/delete tools.** The backend exposes stop/delete routes, but they
@@ -153,40 +139,27 @@ translate, and `failed_count` says how many.
 
 ## Development and verification
 
-The offline test suite runs with `node --test tests/*.test.mjs`. To run the
-Harness contract suites, install the compatible `@deepseek-ai/dsh-tools` peer
-in an isolated checkout and rerun the tests:
-
 ```bash
-npm install --no-save --no-package-lock --ignore-scripts @deepseek-ai/dsh-tools@0.2.2-alpha.3
-node --test tests/*.test.mjs
+npm install --ignore-scripts --no-package-lock
+npm test
+node scripts/dsh_harness_smoke.mjs
 ```
 
-The optional backend end-to-end
-suite needs a separately running backend, a configured provider and `ezdxf`:
+The smoke installs fixed Node, pnpm and Harness versions in a temporary directory,
+then installs the packed plugin and checks a real session with a local fake
+model and backend. It requires network access, but no model API key.
 
-```bash
-CAD_E2E_BASE_URL=http://127.0.0.1:8000 \
-CAD_E2E_ADMIN_TOKEN="your-backend-admin-token" \
-CAD_E2E_TRANSLATE=1 CAD_E2E_PYTHON=/path/to/backend/python \
-node --test tests/backend-e2e.test.mjs
-```
-
-The source plugin was developed in the CAD Translation System
-[PR #40](https://cnb.cool/star_fu/cad-translation-web/-/pulls/40), based on
-commit `13a6f7c`. That PR is not yet merged. With Harness 0.2.1-rc.5 and
-Node 24 on macOS, a real Harness session called all three tools against the
-real backend and DeepSeek, translated three DXF text entities to Chinese and
-downloaded a DXF whose text was independently checked with ezdxf. Windows and
-DWG conversion were not tested. See [the verification record](docs/dsh-plugin.md).
+The source integration is maintained in [CNB PR #40](https://cnb.cool/star_fu/cad-translation-web/-/pulls/40), currently unmerged.
+Real translation was verified on macOS with Node 24 and Harness 0.2.1-rc.5;
+see [the verification record](docs/dsh-plugin.md).
 
 ## Repository layout
 
 ```
 dsh-cad-translation/
 ├── package.json          # dsh.bundle manifest + engines.dsh range
-├── patches/presets.patch.yml   # empty bundle patch; profile patch is generated separately
-├── scripts/build-profile-patch.cjs  # generates the profile patch
+├── patches/presets.patch.yml   # registers the Host tool plugin once
+├── scripts/dsh_harness_smoke.mjs  # real Harness smoke test
 ├── src/
 │   ├── cad-translator.mjs # the three tools (defineTool registrations)
 │   ├── adapter.mjs        # Cordis plugin that names each mounted row

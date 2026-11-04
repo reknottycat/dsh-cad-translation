@@ -22,10 +22,7 @@ registered tools, so the CAD pipeline appears as three tools the model can call
 inside a normal session. Nothing in the plugin depends on the DeepSeek chat
 product, the DeepSeek API, or function calling.
 
-Published versions at the time of writing: `@deepseek-ai/dsh` latest
-`0.2.1-rc.5`, alpha `0.2.2-alpha.3`; `@deepseek-ai/dsh-tools` `0.0.1-rc.1`
-(dist-tag `latest`, stale) with `0.2.1-rc.5` / `0.2.2-alpha.3` as the current
-builds. The contract suite runs against `0.2.2-alpha.3`.
+The supported Harness version is 0.2.1-rc.5; the contract suite also uses the matching dsh-tools version.
 
 ## Why a tool plugin
 
@@ -37,23 +34,12 @@ or add a server process for no benefit here.
 
 ## Composition
 
-```
-dsh profile "web"
-├── @deepseek-ai/dsh-base          Host tree: llm, session, agent, tools, …
-├── @deepseek-ai/dsh-web-app       Web surface + agent presets (standard/ptc/minimal/cordis)
-└── generated profile patch        appends tool rows to presets
-        └── row in `standard`/`cordis` preset
-              └── dsh-cad-translation/translator  → ctx.tools.register × 3
-```
-
-A tool plugin must be mounted in the agent preset. The original bundle patch
-inserted duplicate tools at the host root and caused startup to fail. The bundle
-now supplies an empty patch. `scripts/build-profile-patch.cjs` reads the selected
-profile's composed configuration and generates a separate patch for its existing
-standard and cordis presets. It preserves current preset configuration and does
-not overwrite an existing file. Because the generated patch contains full preset
-configuration, keep it private and regenerate it after changing the profile.
-See the plugin README for the verified Harness 0.2.1-rc.5 loading steps.
+The bundle inserts one Host-level `dsh-cad-translation/translator` row. Its
+three tools are registered once and are inherited by agent scopes unless a
+preset restricts or shadows them. This follows the official
+[subagent-codex bundle](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.5/packages/subagent/subagent-codex/cordis.patch.yml).
+The prior version mounted the tools through a generated preset patch; remove
+that old `--patch` argument when upgrading to avoid duplicate registration.
 
 ## Backend routes used
 
@@ -95,7 +81,16 @@ is placed in the `X-Admin-Token` header only; it never appears in tool output,
 error messages, the session log, or the repository. LLM credentials are not
 involved at all — they stay with the backend.
 
-## Verification record
+## Current verification
+
+On macOS with Node 24.22.2 and Harness 0.2.1-rc.5, the linked checkout was
+installed after its production dependencies. A real headless session called all
+three tools against the actual backend and DeepSeek, translated three English
+DXF text entities into Chinese, and downloaded a DXF whose contents were
+checked with ezdxf. A fresh Web profile started successfully; a Web session
+was not exercised for this release. Windows and DWG remain unverified.
+
+## Previous verification record (earlier release)
 
 Run on Linux, Node.js 26.13.0, `@deepseek-ai/dsh-tools@0.2.2-alpha.3`, and this
 repository's backend on `python3.11` + FastAPI.
@@ -114,8 +109,7 @@ mapping, non-JSON response handling, cancellation forwarding.
 ### Plugin + contract suite — 33 tests, all passing
 
 ```
-npm install --no-save --no-package-lock --ignore-scripts @deepseek-ai/dsh-tools@0.2.2-alpha.3
-node --test tests/*.test.mjs    # 33 pass, 0 fail
+node scripts/dsh_plugin_test.mjs --network   # 33 pass, 0 fail
 ```
 
 Also run green on Node.js 20.20.2, the runtime the CNB CI image uses.
@@ -132,13 +126,13 @@ The extra 20 tests run against the real `@deepseek-ai/dsh-tools`:
 * error paths: missing drawing, directory instead of a file, failed task,
   not-yet-produced artifact, malformed task id.
 
-Without the Harness peer dependency the test command reports 12 passing tests and
+Without a Harness installation the same command reports 11 passing tests and
 skips the three dependent suites with an explanation, so CI stays green in a
 plain Node container.
 
 ### Real-backend end-to-end
 
-Backend started from the separate CAD Translation System repository with `ENABLE_ADMIN_GUARD=false`,
+Backend started from this repository with `ENABLE_ADMIN_GUARD=false`,
 `ASYNC_TASKS_MODE=local`, and `extract_only` (no CAD converter, no LLM key):
 
 ```
@@ -166,7 +160,7 @@ A second backend instance with `ENABLE_ADMIN_GUARD=true` and
 with a hint naming the variable, wrong token → `403`, correct token → the task
 list. The token value never appeared in any tool message.
 
-### Additional verification (macOS)
+### Previous verification (macOS, generated-patch implementation)
 
 With Python 3.12 and Node 22, a real DeepSeek model translated the DXF fixture
 into Chinese; the downloaded DXF was read with ezdxf and all three English

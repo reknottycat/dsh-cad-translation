@@ -15,6 +15,7 @@ async function tryHarness() {
   try {
     return { module: await importHarnessModule('@deepseek-ai/dsh-tools') }
   } catch (error) {
+    if (process.env.DSH_REQUIRE_HARNESS === '1') throw error
     return { skip: error.message.split('\n')[0] }
   }
 }
